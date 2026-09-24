@@ -54,3 +54,6 @@ Desktop.ini
 
 # Logs
 *.log
+
+# Model Weights Cache
+static/insightface_models/
