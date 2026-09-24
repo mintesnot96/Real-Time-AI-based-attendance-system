@@ -1,5 +1,6 @@
 import cv2
 import os
+import shutil
 import pickle
 import warnings
 from flask import Flask, request, render_template
@@ -311,6 +312,38 @@ def add():
 
     names, rolls, times, l = extract_attendance()
     return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess=mess)
+
+
+#### This function will reset all face records and attendance to zero
+@app.route('/clear', methods=['POST'])
+def clear():
+    # Delete all face image folders
+    if os.path.isdir('static/faces'):
+        for d in os.listdir('static/faces'):
+            d_path = os.path.join('static/faces', d)
+            if os.path.isdir(d_path):
+                shutil.rmtree(d_path)
+
+    # Delete embeddings and model files
+    if os.path.exists(EMBEDDINGS_FILE):
+        try:
+            os.remove(EMBEDDINGS_FILE)
+        except Exception:
+            pass
+
+    if os.path.exists('static/face_recognition_model.pkl'):
+        try:
+            os.remove('static/face_recognition_model.pkl')
+        except Exception:
+            pass
+
+    # Reset today's attendance CSV with clean header
+    filepath = f'Attendance/Attendance-{datetoday}.csv'
+    with open(filepath, 'w') as f:
+        f.write('Name,Roll,Time\n')
+
+    names, rolls, times, l = extract_attendance()
+    return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess='All face records and attendance logs have been completely cleared to zero!')
 
 
 #### Our main function which runs the Flask App

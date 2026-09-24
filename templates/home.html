@@ -104,7 +104,7 @@
         </div>
 
         <div class="col"
-            style="border-radius: 20px;padding: 0px;background-color:rgb(211,211,211,0.5);margin:0px 10px 10px 10px;height: 400px;">
+            style="border-radius: 20px;padding: 0px 0px 25px 0px;background-color:rgb(211,211,211,0.5);margin:0px 10px 10px 10px;min-height: 440px;">
             <form action='/add' method="POST" enctype="multipart/form-data">
                 <h2 style="border-radius: 20px 20px 0px 0px;background-color: #0b4c61;color: white;padding: 10px;">Add
                     New User <i class="material-icons">control_point_duplicate</i></h2>
@@ -122,7 +122,12 @@
                     New Student
                 </button>
                 <br>
-                <h5 style="padding: 25px;"><i>Total Students in Database: {{totalreg}}</i></h5>
+                <h5 style="padding: 15px;"><i>Total Students in Database: {{totalreg}}</i></h5>
+            </form>
+            <form action='/clear' method="POST" onsubmit="return confirm('WARNING: Are you sure you want to completely erase all registered faces and reset the database to zero? This action cannot be undone.');">
+                <button type='submit' class='btn btn-danger' style="font-size: 16px; border-radius: 8px; padding: 8px 20px; font-weight: bold; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">
+                    <i class="material-icons" style="vertical-align: middle; font-size: 19px;">delete_forever</i> Clear Database to Zero
+                </button>
             </form>
         </div>
 
