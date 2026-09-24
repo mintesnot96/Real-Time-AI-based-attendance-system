@@ -205,10 +205,21 @@ def add_attendance(name):
 
 
 def get_camera():
-    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    if not cap.isOpened():
-        cap = cv2.VideoCapture(0)
-    return cap
+    """Robust camera acquisition: tests DirectShow and default backends across index 0 and 1 with frame warmup."""
+    for idx in [0, 1]:
+        for backend in [cv2.CAP_DSHOW, cv2.CAP_ANY]:
+            try:
+                cap = cv2.VideoCapture(idx, backend)
+                if cap.isOpened():
+                    for _ in range(8):
+                        ret, frame = cap.read()
+                        if ret and frame is not None and frame.size > 0:
+                            return cap
+                        cv2.waitKey(30)
+                    cap.release()
+            except Exception:
+                pass
+    return None
 
 
 ################## ROUTING FUNCTIONS #########################
@@ -227,7 +238,7 @@ def start():
     engine = request.args.get('engine', 'insightface').lower()
 
     cap = get_camera()
-    if not cap.isOpened():
+    if cap is None:
         return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess='Error: Could not access webcam. Please check your camera permissions or connection.')
 
     # -------------------------------------------------------------
@@ -245,10 +256,16 @@ def start():
             return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess=f'Error loading KNN model: {str(e)}')
 
         win_title = 'Attendance [CLASSIC ENGINE: Haar Cascade + KNN]'
+        consecutive_drops = 0
         while True:
             ret, frame = cap.read()
             if not ret or frame is None:
-                break
+                consecutive_drops += 1
+                if consecutive_drops > 25:
+                    break
+                cv2.waitKey(30)
+                continue
+            consecutive_drops = 0
 
             faces = extract_faces_cascade(frame)
             for (x, y, w, h) in faces:
@@ -281,10 +298,16 @@ def start():
             return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess='InsightFace embeddings empty. Please add a student first.')
 
         win_title = 'Attendance [MODERN SOTA: InsightFace ArcFace AI]'
+        consecutive_drops = 0
         while True:
             ret, frame = cap.read()
             if not ret or frame is None:
-                break
+                consecutive_drops += 1
+                if consecutive_drops > 25:
+                    break
+                cv2.waitKey(30)
+                continue
+            consecutive_drops = 0
 
             faces = face_app.get(frame)
             for face in faces:
@@ -332,19 +355,25 @@ def add():
         os.makedirs(userimagefolder)
 
     cap = get_camera()
-    if not cap.isOpened():
+    if cap is None:
         names, rolls, times, l = extract_attendance()
         return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess='Error: Could not access webcam. Please check your camera permissions or connection.')
 
     i = 0
     frame_count = 0
+    consecutive_drops = 0
     TOTAL_SAMPLES = 20
     win_title = 'Enroll Student [Dual Engine Capture]'
 
     while i < TOTAL_SAMPLES:
         ret, frame = cap.read()
         if not ret or frame is None:
-            break
+            consecutive_drops += 1
+            if consecutive_drops > 25:
+                break
+            cv2.waitKey(30)
+            continue
+        consecutive_drops = 0
         frame_count += 1
 
         # Use InsightFace detector for high-precision face localization
