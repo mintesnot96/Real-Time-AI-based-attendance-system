@@ -7,6 +7,8 @@ from flask import Flask, request, render_template
 from datetime import date, datetime
 import numpy as np
 import pandas as pd
+import joblib
+from sklearn.neighbors import KNeighborsClassifier
 
 # Suppress harmless scikit-image / InsightFace FutureWarnings
 warnings.filterwarnings('ignore', category=FutureWarning)
@@ -20,14 +22,19 @@ app = Flask(__name__)
 datetoday = date.today().strftime("%m_%d_%y")
 datetoday2 = date.today().strftime("%d-%B-%Y")
 
-#### Initializing InsightFace Engine (buffalo_sc: fast, mobile/edge optimized)
+#### 1. Initializing Classic Haar Cascade Face Detector
+CASCADE_PATH = 'static/haarcascade_frontalface_default.xml'
+face_detector = cv2.CascadeClassifier(CASCADE_PATH)
+
+#### 2. Initializing Modern InsightFace Deep AI Engine
 MODEL_DIR = 'static/insightface_models'
 face_app = FaceAnalysis(name='buffalo_sc', root=MODEL_DIR)
 face_app.prepare(ctx_id=-1, det_thresh=0.4, det_size=(320, 320))
 
+KNN_MODEL_FILE = 'static/face_recognition_model.pkl'
 EMBEDDINGS_FILE = 'static/face_embeddings.pkl'
 
-#### If these directories don't exist, create them
+#### Ensure required directories and attendance CSV exist
 if not os.path.isdir('Attendance'):
     os.makedirs('Attendance')
 if not os.path.isdir('static/faces'):
@@ -38,7 +45,7 @@ if f'Attendance-{datetoday}.csv' not in os.listdir('Attendance'):
 
 
 def load_embeddings():
-    """Loads all registered 512-D face embeddings from disk."""
+    """Loads all registered 512-D InsightFace embeddings from disk."""
     if os.path.exists(EMBEDDINGS_FILE):
         try:
             with open(EMBEDDINGS_FILE, 'rb') as f:
@@ -49,13 +56,13 @@ def load_embeddings():
 
 
 def save_embeddings(db):
-    """Saves the embeddings dictionary to disk."""
+    """Saves the InsightFace embeddings dictionary to disk."""
     with open(EMBEDDINGS_FILE, 'wb') as f:
         pickle.dump(db, f)
 
 
-def match_face(live_embedding, db, threshold=0.45):
-    """Computes cosine similarity between live face vector and all registered vectors."""
+def match_face_insight(live_embedding, db, threshold=0.45):
+    """Computes cosine similarity between live face vector and registered vectors."""
     if not db or live_embedding is None:
         return None, 0.0
     norm_live = live_embedding / np.linalg.norm(live_embedding)
@@ -72,47 +79,77 @@ def match_face(live_embedding, db, threshold=0.45):
     return None, best_score
 
 
-def train_model():
-    """Builds/Updates master embeddings for all registered users in static/faces."""
-    user_embeddings = {}
+def extract_faces_cascade(img):
+    """Detects faces using classic Haar Cascade."""
+    if img is None:
+        return ()
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return face_detector.detectMultiScale(gray, 1.3, 5)
+
+
+def train_both_models():
+    """
+    Synchronously trains/updates BOTH recognition models:
+    1. Classic KNN Classifier on 50x50 raw pixel vectors (KNN_MODEL_FILE)
+    2. Modern InsightFace 512-D Normalized Master Embeddings (EMBEDDINGS_FILE)
+    """
     if not os.path.isdir('static/faces'):
         return
+
+    knn_faces = []
+    knn_labels = []
+    insight_embeddings = {}
+
     userlist = os.listdir('static/faces')
     for user in userlist:
         userpath = os.path.join('static/faces', user)
         if not os.path.isdir(userpath):
             continue
-        embs = []
-        for imgname in os.listdir(userpath)[:15]:
+
+        user_insight_embs = []
+        for imgname in os.listdir(userpath):
             img = cv2.imread(os.path.join(userpath, imgname))
             if img is None:
                 continue
-            # Pad image in case it's a tight crop from older Haar sessions
+
+            # 1. Feature extraction for Classic KNN (50x50 flattened vector)
+            resized_50 = cv2.resize(img, (50, 50))
+            knn_faces.append(resized_50.ravel())
+            knn_labels.append(user)
+
+            # 2. Feature extraction for InsightFace (512-D deep embedding)
             img_padded = cv2.copyMakeBorder(img, 60, 60, 60, 60, cv2.BORDER_CONSTANT, value=[128, 128, 128])
             faces = face_app.get(img_padded)
             if len(faces) > 0:
                 emb = faces[0].embedding / np.linalg.norm(faces[0].embedding)
-                embs.append(emb)
-        if embs:
-            master = np.mean(embs, axis=0)
+                user_insight_embs.append(emb)
+
+        if user_insight_embs:
+            master = np.mean(user_insight_embs, axis=0)
             master = master / np.linalg.norm(master)
-            user_embeddings[user] = master
-    save_embeddings(user_embeddings)
-    # Maintain legacy pkl indicator for backward compatibility
-    with open('static/face_recognition_model.pkl', 'w') as f:
-        f.write('InsightFace Model Active\n')
+            insight_embeddings[user] = master
+
+    # Save InsightFace embeddings
+    save_embeddings(insight_embeddings)
+
+    # Train and save Classic KNN Classifier
+    if len(knn_faces) > 0:
+        knn = KNeighborsClassifier(n_neighbors=min(5, len(knn_faces)))
+        knn.fit(np.array(knn_faces), knn_labels)
+        joblib.dump(knn, KNN_MODEL_FILE)
 
 
-# Auto-initialize embeddings if file is missing
-if not os.path.exists(EMBEDDINGS_FILE):
-    train_model()
+# Ensure models are initialized if faces exist
+if os.path.isdir('static/faces') and len(os.listdir('static/faces')) > 0:
+    if not os.path.exists(EMBEDDINGS_FILE) or not os.path.exists(KNN_MODEL_FILE):
+        train_both_models()
 
 
 #### Get number of total registered users
 def totalreg():
     if not os.path.isdir('static/faces'):
         return 0
-    return len([d for d in os.listdir('static/faces') if os.path.isdir(os.path.join('static/faces', d))])
+    return len([d for d in os.listdir('static/faces') if os.path.isdir(os.path.join('static/faces', d)) and len(os.listdir(os.path.join('static/faces', d))) > 0])
 
 
 #### Extract info from today's attendance file in attendance folder
@@ -183,51 +220,98 @@ def home():
     return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2)
 
 
-#### This function will run when we click on Take Attendance Button
+#### This function handles attendance with either InsightFace or Classic Haar+KNN
 @app.route('/start', methods=['GET'])
 def start():
     names, rolls, times, l = extract_attendance()
-    db = load_embeddings()
-    if not db:
-        return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess='There are no registered faces in the database. Please add a new face first.')
+    engine = request.args.get('engine', 'insightface').lower()
 
     cap = get_camera()
     if not cap.isOpened():
         return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess='Error: Could not access webcam. Please check your camera permissions or connection.')
 
-    while True:
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            break
+    # -------------------------------------------------------------
+    # OPTION A: CLASSIC HAAR CASCADE + KNN ENGINE
+    # -------------------------------------------------------------
+    if engine == 'cascade':
+        if not os.path.exists(KNN_MODEL_FILE):
+            cap.release()
+            return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess='Classic model not trained yet. Please add a student first.')
 
-        faces = face_app.get(frame)
-        for face in faces:
-            bbox = face.bbox.astype(int)
-            x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
-            live_emb = face.embedding
-            identified_person, score = match_face(live_emb, db, threshold=0.45)
+        try:
+            knn_model = joblib.load(KNN_MODEL_FILE)
+        except Exception as e:
+            cap.release()
+            return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess=f'Error loading KNN model: {str(e)}')
 
-            if identified_person:
-                # Green bounding box for recognized student
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                confidence = int(score * 100)
-                display_name = identified_person.split('_')[0]
-                label_text = f"{display_name} ({confidence}%)"
-                cv2.putText(frame, label_text, (x1, max(30, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
-                add_attendance(identified_person)
-            else:
-                # Red bounding box for unknown/unregistered person
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                cv2.putText(frame, "Unknown", (x1, max(30, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
+        win_title = 'Attendance [CLASSIC ENGINE: Haar Cascade + KNN]'
+        while True:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
 
-        cv2.putText(frame, "InsightFace AI Engine - Press 'q' or ESC to finish", (30, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.imshow('Attendance - InsightFace Engine', frame)
+            faces = extract_faces_cascade(frame)
+            for (x, y, w, h) in faces:
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 128, 0), 2)
+                try:
+                    face_crop = cv2.resize(frame[y:y+h, x:x+w], (50, 50))
+                    identified_person = knn_model.predict(face_crop.reshape(1, -1))[0]
+                    add_attendance(identified_person)
+                    display_name = identified_person.split('_')[0]
+                    cv2.putText(frame, f"{display_name}", (x, max(30, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 128, 0), 2, cv2.LINE_AA)
+                except Exception:
+                    pass
 
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27 or key == ord('q'):
-            break
-        if cv2.getWindowProperty('Attendance - InsightFace Engine', cv2.WND_PROP_VISIBLE) < 1:
-            break
+            cv2.putText(frame, "Engine: Classic Haar + KNN | Press 'q' or ESC to exit", (30, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
+            cv2.imshow(win_title, frame)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27 or key == ord('q'):
+                break
+            if cv2.getWindowProperty(win_title, cv2.WND_PROP_VISIBLE) < 1:
+                break
+
+    # -------------------------------------------------------------
+    # OPTION B: MODERN SOTA INSIGHTFACE AI ENGINE
+    # -------------------------------------------------------------
+    else:
+        db = load_embeddings()
+        if not db:
+            cap.release()
+            return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess='InsightFace embeddings empty. Please add a student first.')
+
+        win_title = 'Attendance [MODERN SOTA: InsightFace ArcFace AI]'
+        while True:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
+
+            faces = face_app.get(frame)
+            for face in faces:
+                bbox = face.bbox.astype(int)
+                x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
+                live_emb = face.embedding
+                identified_person, score = match_face_insight(live_emb, db, threshold=0.45)
+
+                if identified_person:
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    confidence = int(score * 100)
+                    display_name = identified_person.split('_')[0]
+                    label_text = f"{display_name} ({confidence}%)"
+                    cv2.putText(frame, label_text, (x1, max(30, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
+                    add_attendance(identified_person)
+                else:
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    cv2.putText(frame, "Unknown", (x1, max(30, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
+
+            cv2.putText(frame, "Engine: InsightFace AI (ArcFace) | Press 'q' or ESC to exit", (30, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+            cv2.imshow(win_title, frame)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27 or key == ord('q'):
+                break
+            if cv2.getWindowProperty(win_title, cv2.WND_PROP_VISIBLE) < 1:
+                break
 
     cap.release()
     cv2.destroyAllWindows()
@@ -254,14 +338,16 @@ def add():
 
     i = 0
     frame_count = 0
-    collected_embs = []
-    TOTAL_SAMPLES = 15
+    TOTAL_SAMPLES = 20
+    win_title = 'Enroll Student [Dual Engine Capture]'
 
     while i < TOTAL_SAMPLES:
         ret, frame = cap.read()
         if not ret or frame is None:
             break
         frame_count += 1
+
+        # Use InsightFace detector for high-precision face localization
         faces = face_app.get(frame)
 
         if len(faces) > 0:
@@ -271,25 +357,34 @@ def add():
             x2, y2 = min(frame.shape[1], bbox[2]), min(frame.shape[0], bbox[3])
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 128, 0), 2)
-            cv2.putText(frame, f"Capturing InsightFace Embeddings: {i+1}/{TOTAL_SAMPLES}", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 128, 0), 2, cv2.LINE_AA)
+            cv2.putText(frame, f"Capturing Samples: {i+1}/{TOTAL_SAMPLES}", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 128, 0), 2, cv2.LINE_AA)
 
             if frame_count % 2 == 0 and (x2 > x1) and (y2 > y1):
                 face_crop = frame[y1:y2, x1:x2]
                 cv2.imwrite(f"{userimagefolder}/{newusername}_{i}.jpg", face_crop)
-                emb = primary_face.embedding / np.linalg.norm(primary_face.embedding)
-                collected_embs.append(emb)
                 i += 1
         else:
-            cv2.putText(frame, f"Capturing: {i}/{TOTAL_SAMPLES}", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
-            cv2.putText(frame, "No face detected - look directly at camera", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            # Fallback to Haar Cascade if SCRFD has high threshold
+            cascade_faces = extract_faces_cascade(frame)
+            if len(cascade_faces) > 0:
+                (x, y, w, h) = cascade_faces[0]
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 255), 2)
+                cv2.putText(frame, f"Capturing Samples: {i+1}/{TOTAL_SAMPLES}", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+                if frame_count % 2 == 0:
+                    face_crop = frame[y:y+h, x:x+w]
+                    cv2.imwrite(f"{userimagefolder}/{newusername}_{i}.jpg", face_crop)
+                    i += 1
+            else:
+                cv2.putText(frame, f"Capturing: {i}/{TOTAL_SAMPLES}", (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
+                cv2.putText(frame, "No face detected - look directly at camera", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         cv2.putText(frame, "Press 'q' or ESC to cancel", (30, frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
-        cv2.imshow('Enroll Student - InsightFace', frame)
+        cv2.imshow(win_title, frame)
 
         key = cv2.waitKey(20) & 0xFF
         if key == 27 or key == ord('q'):
             break
-        if cv2.getWindowProperty('Enroll Student - InsightFace', cv2.WND_PROP_VISIBLE) < 1:
+        if cv2.getWindowProperty(win_title, cv2.WND_PROP_VISIBLE) < 1:
             break
 
     cap.release()
@@ -297,18 +392,16 @@ def add():
     for _ in range(5):
         cv2.waitKey(1)
 
-    if len(collected_embs) == 0:
+    saved_images = os.listdir(userimagefolder) if os.path.exists(userimagefolder) else []
+    if len(saved_images) == 0:
         if os.path.exists(userimagefolder):
             os.rmdir(userimagefolder)
-        mess = 'User registration was cancelled.'
+        mess = 'Student enrollment was cancelled.'
     else:
-        # Calculate normalized master embedding and persist
-        master_emb = np.mean(collected_embs, axis=0)
-        master_emb = master_emb / np.linalg.norm(master_emb)
-        db = load_embeddings()
-        db[f"{newusername}_{newuserid}"] = master_emb
-        save_embeddings(db)
-        mess = f"Student {newusername} (ID: {newuserid}) enrolled successfully with InsightFace!"
+        # Synchronously train BOTH engines
+        print('Training Both InsightFace and Haar+KNN Models...')
+        train_both_models()
+        mess = f"Student {newusername} (ID: {newuserid}) enrolled successfully in BOTH engines (InsightFace & Classic Haar)!"
 
     names, rolls, times, l = extract_attendance()
     return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess=mess)
@@ -331,9 +424,9 @@ def clear():
         except Exception:
             pass
 
-    if os.path.exists('static/face_recognition_model.pkl'):
+    if os.path.exists(KNN_MODEL_FILE):
         try:
-            os.remove('static/face_recognition_model.pkl')
+            os.remove(KNN_MODEL_FILE)
         except Exception:
             pass
 
@@ -343,7 +436,7 @@ def clear():
         f.write('Name,Roll,Time\n')
 
     names, rolls, times, l = extract_attendance()
-    return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess='All face records and attendance logs have been completely cleared to zero!')
+    return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess='All face records and attendance logs have been completely cleared to zero for both engines!')
 
 
 #### Our main function which runs the Flask App
